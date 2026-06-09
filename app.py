@@ -102,7 +102,7 @@ if provider_name == "OpenAI":
     location_choice = st.sidebar.selectbox(
         "Localisation IP déclarée",
         list(LOCATIONS.keys()),
-        index=2,  # « Royaume-Uni — Londres » par défaut (comportement d'origine)
+        index=1,  # « France - Paris » par défaut (comportement d'origine)
         help="Localisation déclarée pour le modèle (paramètre `user_location` d'OpenAI). "
              "Peut rendre les sorties plus concises et moins sujettes aux hallucinations.",
     )
