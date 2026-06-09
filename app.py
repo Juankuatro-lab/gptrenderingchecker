@@ -42,6 +42,24 @@ PROVIDERS = {
 }
 
 # ---------------------------------------------------------------------------
+# Localisations prédéfinies (paramètre `user_location`, propre à OpenAI)
+# country = code ISO 3166-1 alpha-2
+# ---------------------------------------------------------------------------
+LOCATIONS = {
+    "Aucune (par défaut)": None,
+    "France — Paris": {"country": "FR", "city": "Paris", "region": "Île-de-France"},
+    "Royaume-Uni — Londres": {"country": "GB", "city": "London", "region": "London"},
+    "États-Unis — New York": {"country": "US", "city": "New York", "region": "New York"},
+    "États-Unis — San Francisco": {"country": "US", "city": "San Francisco", "region": "California"},
+    "Allemagne — Berlin": {"country": "DE", "city": "Berlin", "region": "Berlin"},
+    "Espagne — Madrid": {"country": "ES", "city": "Madrid", "region": "Madrid"},
+    "Italie — Rome": {"country": "IT", "city": "Rome", "region": "Lazio"},
+    "Belgique — Bruxelles": {"country": "BE", "city": "Brussels", "region": "Brussels"},
+    "Canada — Montréal": {"country": "CA", "city": "Montreal", "region": "Quebec"},
+    "Personnalisée…": "custom",
+}
+
+# ---------------------------------------------------------------------------
 # Barre latérale : choix du fournisseur et configuration
 # ---------------------------------------------------------------------------
 st.sidebar.header("Configuration")
@@ -81,11 +99,27 @@ if provider_name == "OpenAI":
         help="Active `external_web_access: False`. Le modèle ne peut s'appuyer que sur "
              "son index mis en cache, sans récupérer la page en direct.",
     )
-    use_location = st.sidebar.toggle(
-        "Déclarer une localisation IP (Londres, UK)",
-        value=True,
-        help="Localisation déclarée pour des sorties plus concises et moins sujettes aux hallucinations.",
+    location_choice = st.sidebar.selectbox(
+        "Localisation IP déclarée",
+        list(LOCATIONS.keys()),
+        index=2,  # « Royaume-Uni — Londres » par défaut (comportement d'origine)
+        help="Localisation déclarée pour le modèle (paramètre `user_location` d'OpenAI). "
+             "Peut rendre les sorties plus concises et moins sujettes aux hallucinations.",
     )
+    preset = LOCATIONS[location_choice]
+    if preset == "custom":
+        # Saisie libre d'une localisation
+        c1, c2 = st.sidebar.columns(2)
+        custom_country = c1.text_input("Pays (ISO 2)", value="FR", help="Ex. FR, US, GB, DE…").strip().upper()
+        custom_city = c2.text_input("Ville", value="Paris").strip()
+        custom_region = st.sidebar.text_input("Région", value="Île-de-France").strip()
+        user_location = {
+            "country": custom_country,
+            "city": custom_city,
+            "region": custom_region,
+        }
+    else:
+        user_location = preset  # dict ou None
     live_mode_label = "live" if not cache_only else "cache"
 else:
     # Mistral / Gemini : recherche web/grounding ON = live, OFF = connaissance d'entraînement
@@ -141,7 +175,7 @@ def build_prompt(target_url: str) -> str:
 # ---------------------------------------------------------------------------
 # Fonctions d'appel par fournisseur
 # ---------------------------------------------------------------------------
-def query_openai(key, model_name, target_url, cache_only_flag, use_location_flag):
+def query_openai(key, model_name, target_url, cache_only_flag, location):
     import openai
 
     client = openai.Client(api_key=key)
@@ -150,13 +184,13 @@ def query_openai(key, model_name, target_url, cache_only_flag, use_location_flag
         "type": "web_search",
         "external_web_access": not cache_only_flag,  # False = index en cache uniquement
     }
-    if use_location_flag:
+    if location:
         # Câblage correct de la localisation (absent du code d'origine)
         web_search_tool["user_location"] = {
             "type": "approximate",
-            "country": "GB",
-            "city": "London",
-            "region": "London",
+            "country": location.get("country", ""),
+            "city": location.get("city", ""),
+            "region": location.get("region", ""),
         }
 
     response = client.responses.create(
@@ -252,7 +286,7 @@ if run:
                 status_box.update(label="Appel à l'API en cours...", state="running")
 
                 if provider_name == "OpenAI":
-                    output_text = query_openai(api_key, model, url, cache_only, use_location)
+                    output_text = query_openai(api_key, model, url, cache_only, user_location)
                 elif provider_name == "Mistral (gratuit)":
                     output_text = query_mistral(api_key, model, url, web_search_on)
                 else:  # Google Gemini
@@ -327,5 +361,5 @@ with st.expander("ℹ️ Comment utiliser cet outil"):
 st.markdown("---")
 st.caption(
     "Outil original par Simone De Palma pour [SEODepths](https://seodepths.com) — "
-    "adaptation française et multi-LLM."
+    "adaptation française et multi-LLM par [JC ESPINOSA](http://jc-espinosa.com/)."
 )
