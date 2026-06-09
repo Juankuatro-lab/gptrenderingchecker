@@ -1,131 +1,331 @@
-
 import os
 import streamlit as st
 
-try:
-    import openai
-    from openai import OpenAI
-except ImportError as e:
-    st.error(f"""
-    ❌ Failed to import OpenAI module.
-    
-    Error: {str(e)}
-    
-    Please ensure requirements.txt contains:
-    ```
-    streamlit
-    openai
-    ```
-    """)
-    st.stop()
-    
-# Page configuration
+# ---------------------------------------------------------------------------
+# Configuration de la page
+# ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="OpenAI URL Inspection Tool",
-    layout="wide"
+    page_title="Outil d'inspection d'URL multi-LLM",
+    layout="wide",
 )
-# Sidebar for API key
+
+# ---------------------------------------------------------------------------
+# Fournisseurs supportés
+#   - OpenAI : test de l'index en cache via `external_web_access`
+#   - Mistral (FR, API gratuite) : recherche web live vs connaissance d'entraînement
+#   - Google Gemini (API gratuite sur les modèles Flash) : grounding Google Search
+# ---------------------------------------------------------------------------
+PROVIDERS = {
+    "OpenAI": {
+        "key_env": ["OPENAI_API_KEY"],
+        "key_label": "Clé API OpenAI",
+        "models": ["gpt-5", "gpt-4.1", "gpt-4o", "gpt-4o-mini"],
+        "free": False,
+        "note": "API payante. Seul fournisseur exposant le paramètre `external_web_access` "
+                "(test de l'index en cache, comme dans l'outil d'origine).",
+    },
+    "Mistral (gratuit)": {
+        "key_env": ["MISTRAL_API_KEY"],
+        "key_label": "Clé API Mistral",
+        "models": ["mistral-medium-latest", "mistral-small-latest", "mistral-large-latest"],
+        "free": True,
+        "note": "Entreprise française. Le plan gratuit inclut la recherche web (connecteur `web_search`).",
+    },
+    "Google Gemini (gratuit)": {
+        "key_env": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "key_label": "Clé API Google Gemini",
+        "models": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3-flash-preview"],
+        "free": True,
+        "note": "Plan gratuit disponible sur les modèles Flash. Le grounding Google Search "
+                "dispose d'un quota gratuit.",
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Barre latérale : choix du fournisseur et configuration
+# ---------------------------------------------------------------------------
 st.sidebar.header("Configuration")
+
+provider_name = st.sidebar.selectbox(
+    "Fournisseur de modèle (LLM)",
+    list(PROVIDERS.keys()),
+    help="Choisissez le LLM à interroger. Les options « (gratuit) » disposent d'une API gratuite.",
+)
+provider = PROVIDERS[provider_name]
+
+# Récupération d'une éventuelle clé dans les variables d'environnement
+default_key = ""
+for env_name in provider["key_env"]:
+    if os.environ.get(env_name):
+        default_key = os.environ[env_name]
+        break
+
 api_key = st.sidebar.text_input(
-    "OpenAI API Key", 
-    type="password", 
-    help="Enter your OpenAI API key",
-    value=os.environ.get("OPENAI_API_KEY", "")
+    provider["key_label"],
+    type="password",
+    help="Saisissez votre clé API pour le fournisseur sélectionné.",
+    value=default_key,
 )
-# Main content
-st.title("OpenAI URL Inspection Tool")
-st.markdown("""
-This app is an early attempt to create a **URL inspection tool** for OpenAI’s ChatGPT. It checks whether a page is cached in OpenAI’s index or requires grounding to synthesize an answer.
 
-The app uses a **UK (London) user location**, which I found to reduce hallucinations in the output and better suit my use cases.
+model = st.sidebar.selectbox("Modèle", provider["models"])
 
-**More details** – [OpenAI Web Search Documentation](https://platform.openai.com/docs/guides/tools-web-search#live-internet-access)
-""")
+st.sidebar.caption(f"ℹ️ {provider['note']}")
+st.sidebar.markdown("---")
+
+# Options spécifiques selon le fournisseur
+if provider_name == "OpenAI":
+    # external_web_access=False -> n'utilise que l'index en cache d'OpenAI
+    cache_only = st.sidebar.toggle(
+        "Index en cache uniquement (sans fetch live)",
+        value=True,
+        help="Active `external_web_access: False`. Le modèle ne peut s'appuyer que sur "
+             "son index mis en cache, sans récupérer la page en direct.",
+    )
+    use_location = st.sidebar.toggle(
+        "Déclarer une localisation IP (Londres, UK)",
+        value=True,
+        help="Localisation déclarée pour des sorties plus concises et moins sujettes aux hallucinations.",
+    )
+    live_mode_label = "live" if not cache_only else "cache"
+else:
+    # Mistral / Gemini : recherche web/grounding ON = live, OFF = connaissance d'entraînement
+    web_search_on = st.sidebar.toggle(
+        "Activer la recherche web / grounding (accès live)",
+        value=False,
+        help="Désactivé : on teste si le modèle connaît la page via son entraînement (sans accès live). "
+             "Activé : le modèle peut chercher la page en direct sur le web.",
+    )
+
+# ---------------------------------------------------------------------------
+# Contenu principal
+# ---------------------------------------------------------------------------
+st.title("Outil d'inspection d'URL multi-LLM")
+st.markdown(
+    """
+Cet outil teste si un LLM peut **accéder au contenu d'une page** et en faire un résumé fidèle.
+
+Selon le fournisseur, le test ne signifie pas exactement la même chose :
+
+- **OpenAI** — avec l'option « index en cache uniquement », on vérifie si la page est présente
+  dans l'index mis en cache d'OpenAI (sans récupération live de la page).
+- **Mistral / Gemini** — ces API n'ont pas d'équivalent « cache seulement ». On distingue donc
+  deux états : *recherche web désactivée* (le modèle s'appuie sur sa connaissance d'entraînement)
+  et *recherche web activée* (le modèle récupère la page en direct).
+
+**Pour en savoir plus** – [Documentation OpenAI Web Search](https://platform.openai.com/docs/guides/tools-web-search#live-internet-access)
+"""
+)
 st.markdown("---")
-# URL input
+
 url = st.text_input(
-    "Enter URL to test:", 
-    placeholder="https://example.com", 
-    help="Paste the URL you want to check"
+    "Saisissez l'URL à tester :",
+    placeholder="https://exemple.com",
+    help="Collez l'URL que vous souhaitez vérifier.",
 )
 
-# Run button
-if st.button("Check OpenAI Index", type="primary", disabled=not api_key or not url):
+# ---------------------------------------------------------------------------
+# Construction du prompt (marqueur structuré, indépendant de la langue de réponse)
+# ---------------------------------------------------------------------------
+def build_prompt(target_url: str) -> str:
+    return (
+        f"Peux-tu accéder au contenu de cette page : {target_url} ?\n\n"
+        "Commence IMPÉRATIVEMENT ta réponse par l'un de ces deux marqueurs :\n"
+        "- \"[ACCÈS_OUI]\" si tu as réellement pu accéder au contenu de la page et peux en faire "
+        "un résumé fidèle ;\n"
+        "- \"[ACCÈS_NON]\" si tu n'as pas pu y accéder (page bloquée, introuvable, "
+        "ou contenu indisponible).\n\n"
+        "Ensuite, rédige un court résumé de la page (si accès) ou explique pourquoi l'accès a échoué."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fonctions d'appel par fournisseur
+# ---------------------------------------------------------------------------
+def query_openai(key, model_name, target_url, cache_only_flag, use_location_flag):
+    import openai
+
+    client = openai.Client(api_key=key)
+
+    web_search_tool = {
+        "type": "web_search",
+        "external_web_access": not cache_only_flag,  # False = index en cache uniquement
+    }
+    if use_location_flag:
+        # Câblage correct de la localisation (absent du code d'origine)
+        web_search_tool["user_location"] = {
+            "type": "approximate",
+            "country": "GB",
+            "city": "London",
+            "region": "London",
+        }
+
+    response = client.responses.create(
+        model=model_name,
+        tools=[web_search_tool],
+        tool_choice="auto",
+        input=build_prompt(target_url),
+    )
+    return response.output_text
+
+
+def query_mistral(key, model_name, target_url, web_on):
+    from mistralai import Mistral
+
+    client = Mistral(api_key=key)
+    tools = [{"type": "web_search"}] if web_on else None
+
+    response = client.beta.conversations.start(
+        model=model_name,
+        inputs=build_prompt(target_url),
+        tools=tools,
+    )
+
+    # Extraction robuste du texte depuis les `outputs`
+    parts = []
+    for output in getattr(response, "outputs", []) or []:
+        if getattr(output, "type", None) == "message.output":
+            content = output.content
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                for chunk in content:
+                    text = getattr(chunk, "text", None)
+                    if text is None and isinstance(chunk, dict):
+                        text = chunk.get("text")
+                    if text:
+                        parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def query_gemini(key, model_name, target_url, grounding_on):
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=key)
+
+    config = None
+    if grounding_on:
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        )
+
+    response = client.models.generate_content(
+        model=model_name,
+        contents=build_prompt(target_url),
+        config=config,
+    )
+    return response.text
+
+
+# ---------------------------------------------------------------------------
+# Interprétation du résultat (basée sur le marqueur structuré)
+# ---------------------------------------------------------------------------
+def interpret(output_text: str) -> str:
+    if not output_text:
+        return "incertain"
+    head = output_text.strip().upper()[:40]
+    # On tolère les variantes avec/sans accent
+    if "[ACCÈS_OUI]" in head or "[ACCES_OUI]" in head:
+        return "oui"
+    if "[ACCÈS_NON]" in head or "[ACCES_NON]" in head:
+        return "non"
+    return "incertain"
+
+
+# ---------------------------------------------------------------------------
+# Bouton d'exécution
+# ---------------------------------------------------------------------------
+run = st.button(
+    "Tester l'accès du LLM",
+    type="primary",
+    disabled=not api_key or not url,
+)
+
+if run:
     if not api_key:
-        st.error("⚠️ Please enter your OpenAI API key in the sidebar")
+        st.error("⚠️ Veuillez saisir votre clé API dans la barre latérale.")
     elif not url:
-        st.error("⚠️ Please enter a URL to test")
+        st.error("⚠️ Veuillez saisir une URL à tester.")
     else:
         try:
-            with st.status("Checking URL...", expanded=True) as status_box:
-                # Initialize OpenAI client 
-                openai_client = openai.Client(api_key=api_key)
-                
-                # Check cached pages (external_web_access: False)
-                external_web_access = False
-                
-                # User location based on OpenAI's documentation (London, UK)
-                user_location = {
-                    "type": "approximate",
-                    "country": "GB",
-                    "city": "London",
-                    "region": "London",
-                }
-                
-                status_box.update(label="Making API request...", state="running")
-                
-                # Make API call
-                response = openai_client.responses.create(
-                    model="gpt-5",
-                    tools=[{
-                        "type": "web_search",
-                        "external_web_access": external_web_access
-                    }],
-                    tool_choice="auto",
-                    input=f"Can you access this page {url}? If you can, make a summary"
+            with st.status("Vérification de l'URL...", expanded=True) as status_box:
+                status_box.update(label="Appel à l'API en cours...", state="running")
+
+                if provider_name == "OpenAI":
+                    output_text = query_openai(api_key, model, url, cache_only, use_location)
+                elif provider_name == "Mistral (gratuit)":
+                    output_text = query_mistral(api_key, model, url, web_search_on)
+                else:  # Google Gemini
+                    output_text = query_gemini(api_key, model, url, web_search_on)
+
+                status_box.update(label="Terminé", state="complete")
+
+            # Réponse brute
+            st.subheader("Réponse du modèle :")
+            st.info(output_text or "(réponse vide)")
+
+            # Interprétation
+            st.subheader("Interprétation :")
+            verdict = interpret(output_text)
+
+            if verdict == "oui":
+                if provider_name == "OpenAI" and cache_only:
+                    st.success(
+                        "✅ **La page semble présente dans l'index en cache d'OpenAI.**\n\n"
+                        "Le modèle a pu en restituer le contenu sans récupération live. "
+                        "Peu ou pas d'optimisation nécessaire de ce côté."
+                    )
+                else:
+                    st.success(
+                        "✅ **Le modèle a pu accéder au contenu de la page et en faire un résumé.**\n\n"
+                        "Selon le mode choisi, cela signifie soit un accès web live réussi, "
+                        "soit une bonne couverture par la connaissance d'entraînement du modèle."
+                    )
+            elif verdict == "non":
+                st.warning(
+                    "⚠️ **Le modèle n'a pas pu accéder au contenu de la page.**\n\n"
+                    "Causes possibles : blocage par du JavaScript (rendu CSR, pop-ups de géolocalisation), "
+                    "page absente de l'index, ou contenu indisponible. "
+                    "Envisagez de revoir le JavaScript bloquant le rendu et de renforcer les mentions "
+                    "et citations via des efforts de Digital PR ciblés."
                 )
-                
-                status_box.update(label="Complete", state="complete")
-                
-                # Get response text
-                output_text = response.output_text
-                
-                # Display raw response
-                st.subheader("Response from OpenAI:")
-                st.info(output_text)
-                
-                # Interpret results
-                st.subheader("Interpretation:")
-                
-                if output_text.startswith("Yes—I can ") or output_text.startswith("I can access "):
-                    st.success("""
-                    ✅ **ChatGPT-User was not prevented by JavaScript blockers and surfaced a cached raw HTML to synthesize a likely answer in the live chat.**
-                    
-                    ChatGPT is familiar with your page and there may be little to no optimisation efforts for you take on.
-                    """)
-                elif (output_text.startswith("I can't access") or 
-                      output_text.startswith("I couldn’t") or
-                      output_text.startswith("I tried to open") or
-                      ", but " in output_text):
-                    st.warning("""
-                    ⚠️ **ChatGPT-User may have been prevented by JavaScript blockers (CSR geo-location pop-ups e.g;) or the page simply couldn't be found in OpenAI's cached index.**
-                    
-                    Consider reviewing blocking CSR JavaScript and increase mentions and citations via targeted Digital PR efforts.
-                    """)
-                    
+            else:
+                st.info(
+                    "ℹ️ **Résultat incertain** — le modèle n'a pas renvoyé de marqueur exploitable. "
+                    "Lisez la réponse brute ci-dessus pour juger manuellement."
+                )
+
         except Exception as e:
-            st.error(f"❌ An error occurred: {str(e)}")
-            st.info("Please check your API key and try again. Make sure you have access to the GPT-5 model and the responses API.")
-# Instructions
-with st.expander("ℹ️ How to use this tool"):
-    st.markdown("""
-    1. **Enter your OpenAI API Key** in the sidebar (required)
-    2. **Paste the URL** you want to test in the input field
-    3. **Click "Check OpenAI Index"** to test if the URL is cached in OpenAI's index
-    4. Review the results
-    
-    **Note:** This tool checks cached pages only and uses a fixed IP location for more consistent results - this is based on personal recent tests.
-    """)
-# Footer
+            st.error(f"❌ Une erreur est survenue : {str(e)}")
+            st.info(
+                "Vérifiez votre clé API et le modèle sélectionné. Assurez-vous que le SDK du "
+                "fournisseur est bien installé (voir requirements.txt) et que vous avez accès "
+                "au modèle choisi."
+            )
+
+# ---------------------------------------------------------------------------
+# Mode d'emploi
+# ---------------------------------------------------------------------------
+with st.expander("ℹ️ Comment utiliser cet outil"):
+    st.markdown(
+        """
+1. **Choisissez un fournisseur** dans la barre latérale (Mistral et Gemini disposent d'une API gratuite).
+2. **Saisissez votre clé API** correspondante.
+3. **Sélectionnez un modèle** et réglez les options (cache/live, localisation, recherche web).
+4. **Collez l'URL** à tester puis cliquez sur **« Tester l'accès du LLM »**.
+5. Analysez la **réponse brute** et l'**interprétation**.
+
+**Rappel important :** le test « index en cache uniquement » n'existe que chez OpenAI
+(paramètre `external_web_access`). Pour Mistral et Gemini, l'outil distingue
+« connaissance d'entraînement » (recherche désactivée) et « accès live » (recherche activée).
+"""
+    )
+
+# ---------------------------------------------------------------------------
+# Pied de page
+# ---------------------------------------------------------------------------
 st.markdown("---")
-st.caption("Delivered by Simone De Palma for [SEODepths](https://seodepths.com)")
+st.caption(
+    "Outil original par Simone De Palma pour [SEODepths](https://seodepths.com) — "
+    "adaptation française et multi-LLM."
+)
